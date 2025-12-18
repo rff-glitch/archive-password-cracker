@@ -1,61 +1,94 @@
 #!/usr/bin/env bash
+set -e
+
 FILE="$1"
-JOHN_DIR="$HOME/john"
-RUN_DIR="$JOHN_DIR/run"
+WORKDIR="$(pwd)"
+JOHN="/opt/john"
+RUN="$JOHN/run"
 
-spin() {
-  local p=$1 s='|/-\'
-  while kill -0 $p 2>/dev/null; do
-    for i in {0..3}; do printf "\r[%c] " "${s:$i:1}"; sleep .1; done
-  done
-  printf "\r"
-}
-
-echo "[*] Updating system..."
-sudo apt update -y >/dev/null 2>&1 & spin $!
-echo "[✔] System updated"
-
-echo "[*] Installing dependencies..."
-sudo apt install -y build-essential git perl p7zip-full unrar-free rar unzip libssl-dev zlib1g-dev libbz2-dev >/dev/null 2>&1 & spin $!
-echo "[✔] Dependencies ready"
-
-if [ ! -d "$JOHN_DIR" ]; then
-  echo "[*] Building John Jumbo..."
-  git clone https://github.com/openwall/john "$JOHN_DIR" >/dev/null 2>&1
-  cd "$JOHN_DIR/src"
-  ./configure >/dev/null 2>&1
-  make -sj$(nproc) >/dev/null 2>&1 & spin $!
-  echo "[✔] John Jumbo built"
-else
-  echo "[✔] John Jumbo ready"
-fi
-
-[ -z "$FILE" ] || [ ! -f "$FILE" ] && echo "[✖] File not found" && exit 1
-
-OUT="${FILE%.*}.hash"
-
-echo "[*] Extracting hash..."
-case "$FILE" in
-  *.zip) "$RUN_DIR/zip2john" "$FILE" > "$OUT" ;;
-  *.rar) "$RUN_DIR/rar2john" "$FILE" > "$OUT" ;;
-  *.7z)  "$RUN_DIR/7z2john"  "$FILE" > "$OUT" ;;
-  *) echo "[✖] Unsupported archive"; exit 1 ;;
-esac &
-spin $!
-echo "[✔] Hash saved to $OUT"
-
-HASH_LINE=$(head -n 1 "$OUT")
-
-if echo "$HASH_LINE" | grep -q '\$zip2\$'; then
-  MODE=13600
-elif echo "$HASH_LINE" | grep -q '\$rar5\$'; then
-  MODE=13000
-elif echo "$HASH_LINE" | grep -q '\$7z\$'; then
-  MODE=11600
-else
-  echo "[✖] Unable to detect Hashcat mode"
+if [ -z "$FILE" ]; then
+  echo "[✖] Usage: sudo ./tool.sh <archive>"
   exit 1
 fi
 
+if [ ! -f "$FILE" ]; then
+  echo "[✖] File not found"
+  exit 1
+fi
+
+echo "[*] Installing deps..."
+apt update -y >/dev/null
+apt install -y git build-essential python3 perl p7zip-full rar unzip hashcat libssl-dev zlib1g-dev >/dev/null
+echo "[✔] Deps ready"
+
+if [ -d "$JOHN/run" ]; then
+  echo "[✔] John already built"
+else
+  echo "[*] Building John Jumbo..."
+  rm -rf "$JOHN"
+  git clone https://github.com/openwall/john "$JOHN" >/dev/null
+  cd "$JOHN/src"
+  ./configure >/dev/null
+  make -sj$(nproc) >/dev/null
+  cd "$WORKDIR"
+  echo "[✔] John ready"
+fi
+
+EXT="${FILE##*.}"
+OUT="${FILE}.hash"
+
+echo "[*] Extracting hash..."
+
+case "$EXT" in
+  zip)
+    "$RUN/zip2john" "$FILE" | sed -n 's/.*\(\$zip2\$.*\$\).*/\1/p' > "$OUT"
+    MODE=13600
+    ;;
+  rar)
+    "$RUN/rar2john" "$FILE" > "$OUT"
+    MODE=13000
+    ;;
+  7z)
+    "$RUN/7z2john" "$FILE" > "$OUT"
+    MODE=11600
+    ;;
+  *)
+    echo "[✖] Unsupported archive type"
+    exit 1
+    ;;
+esac
+
+if [ ! -s "$OUT" ]; then
+  echo "[✖] Hash extraction failed"
+  exit 1
+fi
+
+echo "[✔] Hash extracted to $OUT"
 echo
-echo "[🔥] Auto‑detected Hashcat mode: $MODE"
+echo "Choose bruteforce mode:"
+echo "1) Numbers"
+echo "2) Lowercase"
+echo "3) Uppercase"
+echo "4) Lower + Upper"
+echo "5) Custom hashcat args"
+read -p "> " CHOICE
+
+case "$CHOICE" in
+  1) MASK="?d?d?d?d?d?d?d?d" ;;
+  2) MASK="?l?l?l?l?l?l?l?l" ;;
+  3) MASK="?u?u?u?u?u?u?u?u" ;;
+  4) MASK="?l?l?l?l?l?l?l?l" ;;
+  5)
+     read -p "Enter full hashcat args: " CUSTOM
+     hashcat $CUSTOM "$OUT"
+     exit 0
+     ;;
+  *)
+     echo "[✖] Invalid option"
+     exit 1
+     ;;
+esac
+
+echo "[🔥] Running Hashcat"
+echo "Mode: $MODE"
+hashcat -m "$MODE" "$OUT" -a 3 "$MASK"
